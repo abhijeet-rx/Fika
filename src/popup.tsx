@@ -115,9 +115,8 @@ export function App() {
       {/* TAB CONTENT */}
       <div style={styles.contentArea}>
         {activeTab === "dashboard" && <StatsDashboard />}
-        {activeTab === "settings" && (
-          <SettingsForm onSaved={() => setActiveTab("dashboard")} />
-        )}
+        {activeTab === "settings" && <SettingsForm />}
+
       </div>
 
       {/* FOOTER */}

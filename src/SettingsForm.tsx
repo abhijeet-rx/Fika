@@ -16,7 +16,7 @@
 // ============================================================
 
 import React, { useEffect, useState } from "react";
-import { getCredentials, saveCredentials, validateToken } from "./githubAuth";
+import { getCredentials, saveCredentials, validateRepository } from "./githubAuth";
 
 // ----------------------------------------------------------
 // Settings Data Interface
@@ -250,12 +250,16 @@ export function SettingsForm(props: { onSaved?: () => void }) {
     setSaving(true);
 
     try {
-      // 2. Validate token against GitHub API
-      const validation = await validateToken(settings.githubToken.trim());
+      // 2. Validate token AND repository access against GitHub API
+      const validation = await validateRepository(
+        settings.githubToken.trim(),
+        settings.githubOwner.trim(),
+        settings.githubRepo.trim()
+      );
 
       if (!validation.valid) {
         setIsConnected(false);
-        setMessage({ text: "Token validation failed: " + validation.error, isError: true });
+        setMessage({ text: "Verification failed: " + validation.error, isError: true });
         setSaving(false);
         return;
       }
@@ -272,13 +276,11 @@ export function SettingsForm(props: { onSaved?: () => void }) {
       setIsConnected(true);
       setVerifiedUsername(username);
       setMessage({
-        text: `🟢 Connection Verified! Connected as @${username}`,
+        text: `🟢 Connection Verified! Connected to ${settings.githubOwner.trim()}/${settings.githubRepo.trim()}`,
         isError: false,
       });
 
-      if (props.onSaved) {
-        props.onSaved();
-      }
+      // Keep user on settings tab so they can see their green signal indicator
     } catch (err) {
       setIsConnected(false);
       setMessage({
@@ -289,6 +291,7 @@ export function SettingsForm(props: { onSaved?: () => void }) {
       setSaving(false);
     }
   };
+
 
 
   if (loading) {

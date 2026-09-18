@@ -199,6 +199,77 @@ export async function validateToken(token: string): Promise<ValidationResult> {
 }
 
 // ----------------------------------------------------------
+// Validate Token AND Target Repository Access
+// ----------------------------------------------------------
+// Verifies that:
+//   1. The token is valid and authenticated
+//   2. The target repository (owner/repo) exists
+//   3. The token has access permissions to the repository
+// ----------------------------------------------------------
+export async function validateRepository(
+  token: string,
+  owner: string,
+  repo: string
+): Promise<ValidationResult> {
+  // Step 1: Validate token and get username
+  const tokenResult = await validateToken(token);
+  if (!tokenResult.valid) {
+    return tokenResult;
+  }
+
+  // Step 2: Validate target repository exists and is accessible
+  try {
+    const encodedOwner = encodeURIComponent(owner);
+    const encodedRepo = encodeURIComponent(repo);
+    const repoUrl = `https://api.github.com/repos/${encodedOwner}/${encodedRepo}`;
+
+    const response = await fetch(repoUrl, {
+      method: "GET",
+      headers: {
+        Authorization: "Bearer " + token,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return {
+          valid: false,
+          username: tokenResult.username,
+          error: `Repository '${owner}/${repo}' not found or is private/inaccessible with this token.`,
+        };
+      }
+      if (response.status === 403) {
+        return {
+          valid: false,
+          username: tokenResult.username,
+          error: `Token does not have sufficient access permissions for repository '${owner}/${repo}'.`,
+        };
+      }
+      return {
+        valid: false,
+        username: tokenResult.username,
+        error: `GitHub API error (${response.status}) checking repository '${owner}/${repo}'.`,
+      };
+    }
+
+    return {
+      valid: true,
+      username: tokenResult.username,
+      error: "",
+    };
+  } catch (err) {
+    return {
+      valid: false,
+      username: tokenResult.username,
+      error: "Network error: Unable to verify repository on GitHub.",
+    };
+  }
+}
+
+
+// ----------------------------------------------------------
 // Clear all stored credentials (logout)
 // ----------------------------------------------------------
 export function clearCredentials(): Promise<void> {

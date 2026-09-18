@@ -1,549 +1,70 @@
 // ============================================================
-// Fika Content Script
-// Injected into coding platform pages (e.g., leetcode.com, geeksforgeeks.org)
+// Fika Content Script — v3
+// Injected into LeetCode and GeeksforGeeks problem pages.
+//
+// Detection strategy:
+//   LeetCode  → Intercepts fetch() responses to /submissions/detail/
+//               to catch the API confirming "Accepted". This is 100%
+//               reliable regardless of DOM class-name churn.
+//   GFG       → Watches for DOM text "Correct Answer" / "Problem Solved
+//               Successfully" appearing AFTER the user clicks Submit.
+//
+// Both adapters use a submit-intent signal (click / Ctrl+Enter listener)
+// to avoid false-positive triggers on page load.
 // ============================================================
 
 (function () {
   "use strict";
 
-  console.log("[Fika] Content script initialized.");
-  console.log("[Fika] Current URL:", window.location.href);
+  console.log("[Fika] Content script v3 loaded on:", window.location.href);
 
-  // ============================================================
-  // Toast Notification Helper
-  // ============================================================
-  function showToast(message, type = "info") {
+  // ── Deduplication ──────────────────────────────────────────
+  let lastSyncedKey = "";
+
+  // ── Toast helper ───────────────────────────────────────────
+  function showToast(message, type) {
+    type = type || "info";
     let container = document.getElementById("fika-toast-container");
     if (!container) {
       container = document.createElement("div");
       container.id = "fika-toast-container";
-      container.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        z-index: 999999;
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      `;
+      container.style.cssText =
+        "position:fixed;top:20px;right:20px;z-index:999999;" +
+        "display:flex;flex-direction:column;gap:10px;" +
+        "font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;";
       document.body.appendChild(container);
     }
+    var bg =
+      type === "success" ? "#10b981"
+      : type === "error" ? "#ef4444"
+      : type === "warning" ? "#f59e0b"
+      : "#3b82f6";
 
-    const toast = document.createElement("div");
-    const bgColor =
-      type === "success"
-        ? "#10b981"
-        : type === "error"
-        ? "#ef4444"
-        : type === "warning"
-        ? "#f59e0b"
-        : "#3b82f6";
-
-    toast.style.cssText = `
-      background: ${bgColor};
-      color: #ffffff;
-      padding: 12px 18px;
-      border-radius: 8px;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
-      font-size: 14px;
-      font-weight: 600;
-      max-width: 380px;
-      line-height: 1.4;
-      transition: opacity 0.4s ease, transform 0.4s ease;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    `;
+    var toast = document.createElement("div");
+    toast.style.cssText =
+      "background:" + bg + ";color:#fff;padding:12px 18px;border-radius:8px;" +
+      "box-shadow:0 10px 25px -5px rgba(0,0,0,.4);font-size:14px;font-weight:600;" +
+      "max-width:380px;line-height:1.4;transition:opacity .4s,transform .4s;";
     toast.textContent = message;
-
     container.appendChild(toast);
-
-    setTimeout(() => {
+    setTimeout(function () {
       toast.style.opacity = "0";
       toast.style.transform = "translateY(-10px)";
-      setTimeout(() => toast.remove(), 400);
+      setTimeout(function () { toast.remove(); }, 400);
     }, 6000);
   }
 
-  // ============================================================
-  // LeetCode Platform Adapter
-  // ============================================================
-  const LeetCodeAdapter = {
-    platformName: "LeetCode",
-
-    matchesUrl(url) {
-      return /leetcode\.com\/problems\/([a-z0-9-]+)/i.test(url);
-    },
-
-    isAccepted() {
-      const resultElements = document.querySelectorAll(
-        '[data-e2e-locator="submission-result"], [class*="result"], [class*="success"], [class*="status"], [class*="accepted"]'
-      );
-      for (const el of resultElements) {
-        const text = el.textContent ? el.textContent.trim() : "";
-        if (/\bAccepted\b/i.test(text)) {
-          return true;
-        }
-      }
-      return false;
-    },
-
-    extractProblem() {
-      console.log("[Fika] Starting LeetCode problem extraction...");
-
-      // A. Extract Problem Title & ID
-      let problemId = "Unknown";
-      let title = "Unknown";
-
-      const titlePattern = /(\d+)\.\s*(.+?)\s*-\s*LeetCode/;
-      const titleMatch = document.title.match(titlePattern);
-
-      if (titleMatch) {
-        problemId = titleMatch[1];
-        title = titleMatch[2].trim();
-      } else {
-        const headings = document.querySelectorAll("h1, h2, h3, h4, [class*='title']");
-        for (const heading of headings) {
-          const text = heading.textContent.trim();
-          const headingMatch = text.match(/^(\d+)\.\s*(.+)/);
-          if (headingMatch) {
-            problemId = headingMatch[1];
-            title = headingMatch[2].trim();
-            break;
-          }
-        }
-      }
-
-      // B. Extract Difficulty
-      let difficulty = "Easy";
-      const validDifficulties = ["Easy", "Medium", "Hard"];
-      const diffSelectors = [
-        "[class*='difficulty-easy']",
-        "[class*='difficulty-medium']",
-        "[class*='difficulty-hard']"
-      ];
-
-      for (const selector of diffSelectors) {
-        try {
-          const el = document.querySelector(selector);
-          if (el) {
-            const text = el.textContent.trim();
-            if (validDifficulties.includes(text)) {
-              difficulty = text;
-              break;
-            }
-          }
-        } catch (e) {}
-      }
-
-      if (difficulty === "Easy") {
-        const candidates = document.querySelectorAll("div, span, a, p");
-        for (const el of candidates) {
-          const text = el.textContent.trim();
-          if (validDifficulties.includes(text) && el.children.length === 0) {
-            difficulty = text;
-            break;
-          }
-        }
-      }
-
-      // C. Extract Topics
-      const topics = [];
-      const topicLinks = document.querySelectorAll('a[href*="/tag/"]');
-      topicLinks.forEach((el) => {
-        const tagText = el.textContent.trim();
-        if (tagText && !topics.includes(tagText)) {
-          topics.push(tagText);
-        }
-      });
-
-      // D. Extract Statement
-      let statement = "";
-      function htmlToCleanText(element) {
-        const clone = element.cloneNode(true);
-        clone.querySelectorAll("style, script").forEach((el) => el.remove());
-        clone.querySelectorAll("br").forEach((el) => el.replaceWith("\n"));
-        clone.querySelectorAll("p, div, li, h1, h2, h3, h4, pre").forEach((el) => {
-          el.prepend(document.createTextNode("\n"));
-        });
-        clone.querySelectorAll("li").forEach((el) => {
-          el.prepend(document.createTextNode("• "));
-        });
-
-        let text = clone.textContent || "";
-        text = text.replace(/\n{3,}/g, "\n\n");
-        return text
-          .split("\n")
-          .map((line) => line.trim())
-          .join("\n")
-          .trim();
-      }
-
-      const descriptionSelectors = [
-        '[data-track-load="description_content"]',
-        'div[class*="elfjS"]',
-        'div[class*="_1l1MA"]',
-        'div.content__u3I1 div.question-content',
-        'div[class*="question-content"]',
-        'div[class*="description"]'
-      ];
-
-      for (const selector of descriptionSelectors) {
-        try {
-          const el = document.querySelector(selector);
-          if (el && el.textContent.trim().length > 50) {
-            statement = htmlToCleanText(el);
-            break;
-          }
-        } catch (e) {}
-      }
-
-      // E. Test cases
-      const testCases = [];
-      if (statement) {
-        const testCasePattern = /Input:\s*([\s\S]*?)Output:\s*([\s\S]*?)(?=Example|Input:|Explanation|Constraints|Note:|\n\n|$)/gi;
-        let tcMatch;
-        while ((tcMatch = testCasePattern.exec(statement)) !== null) {
-          const input = tcMatch[1].trim();
-          const output = tcMatch[2].trim();
-          if (input || output) {
-            testCases.push({ input: input, output: output });
-          }
-        }
-      }
-
-      // F. Language
-      let language = "C++";
-      const knownLanguages = [
-        "C++", "Java", "Python", "Python3", "C", "C#",
-        "JavaScript", "TypeScript", "PHP", "Swift",
-        "Kotlin", "Dart", "Go", "Ruby", "Scala",
-        "Rust", "Racket", "Erlang", "Elixir",
-        "MySQL", "MS SQL Server", "Oracle"
-      ];
-
-      const buttons = document.querySelectorAll("button");
-      for (const btn of buttons) {
-        const btnText = btn.textContent.trim();
-        if (knownLanguages.includes(btnText)) {
-          language = btnText;
-          break;
-        }
-      }
-
-      // G. Code
-      let code = "";
-      const viewLines = document.querySelectorAll(".view-line");
-      const cmLines = document.querySelectorAll(".cm-line");
-      const aceLines = document.querySelectorAll(".ace_line");
-
-      if (viewLines.length > 0) {
-        const lines = [];
-        viewLines.forEach((lineEl) => {
-          let lineText = lineEl.textContent || "";
-          lines.push(lineText.replace(/\u00A0/g, " "));
-        });
-        code = lines.join("\n").replace(/\n+$/, "");
-      } else if (cmLines.length > 0) {
-        const lines = [];
-        cmLines.forEach((lineEl) => {
-          let lineText = lineEl.textContent || "";
-          lines.push(lineText.replace(/\u00A0/g, " "));
-        });
-        code = lines.join("\n").replace(/\n+$/, "");
-      } else if (aceLines.length > 0) {
-        const lines = [];
-        aceLines.forEach((lineEl) => {
-          let lineText = lineEl.textContent || "";
-          lines.push(lineText.replace(/\u00A0/g, " "));
-        });
-        code = lines.join("\n").replace(/\n+$/, "");
-      }
-
-      const urlMatch = window.location.href.match(/leetcode\.com\/problems\/([a-z0-9-]+)/i);
-      const slug = urlMatch ? urlMatch[1] : "unknown-problem";
-
-      const problemInfo = {
-        problemId: problemId,
-        title: title,
-        slug: slug,
-        platform: "LeetCode",
-        difficulty: difficulty,
-        topics: topics,
-        primaryTopic: topics.length > 0 ? topics[0] : "General",
-        statement: statement,
-        testCases: testCases,
-        language: language,
-        code: code,
-        acceptedAt: new Date().toISOString(),
-      };
-
-      console.log("[Fika] ✅ LeetCodeAdapter extracted CodingProblem:", problemInfo);
-      return problemInfo;
-    },
-
-    _observer: null,
-
-    startObserving(onAccepted) {
-      let alreadyDetected = false;
-      const scriptLoadTime = Date.now();
-      const INITIAL_IGNORE_PERIOD_MS = 1500;
-
-      const checkDomForAccepted = () => {
-        if (alreadyDetected) return;
-        if (Date.now() - scriptLoadTime < INITIAL_IGNORE_PERIOD_MS) return;
-
-        if (this.isAccepted()) {
-          alreadyDetected = true;
-          console.log("[Fika] ✅ ACCEPTED submission detected by LeetCodeAdapter!");
-          const problemInfo = this.extractProblem();
-          if (onAccepted && typeof onAccepted === "function") {
-            onAccepted(problemInfo);
-          }
-          this.stopObserving();
-        }
-      };
-
-      this._observer = new MutationObserver(() => {
-        checkDomForAccepted();
-      });
-
-      this._observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
-
-      setTimeout(checkDomForAccepted, 2000);
-      console.log("[Fika] LeetCodeAdapter Observer active.");
-    },
-
-    stopObserving() {
-      if (this._observer) {
-        this._observer.disconnect();
-        this._observer = null;
-        console.log("[Fika] LeetCodeAdapter observer disconnected.");
-      }
-    },
-  };
-
-  // ============================================================
-  // GeeksforGeeks Platform Adapter
-  // ============================================================
-  const GeeksForGeeksAdapter = {
-    platformName: "GeeksforGeeks",
-
-    matchesUrl(url) {
-      return /geeksforgeeks\.org\/problems\/([a-z0-9-]+)/i.test(url);
-    },
-
-    isAccepted() {
-      const statusSelectors = [
-        "[class*='status']",
-        "[class*='result']",
-        "[class*='problem-tab']",
-        "div.problems_header_content__status",
-      ];
-      for (const selector of statusSelectors) {
-        const elements = document.querySelectorAll(selector);
-        for (const el of elements) {
-          const text = el.textContent ? el.textContent.trim() : "";
-          if (
-            text.includes("Correct Answer") ||
-            text.includes("Problem Solved Successfully")
-          ) {
-            return true;
-          }
-        }
-      }
-      return false;
-    },
-
-    extractProblem() {
-      console.log("[Fika] Starting GeeksforGeeks problem extraction...");
-      const currentUrl = window.location.href;
-      const urlMatch = currentUrl.match(/geeksforgeeks\.org\/problems\/([a-z0-9-]+)/i);
-      const slug = urlMatch ? urlMatch[1] : "unknown-gfg-problem";
-
-      let title = "Unknown Problem";
-      let problemId = slug;
-
-      const pageTitle = document.title;
-      const titleMatch = pageTitle.match(/^([^|]+)\s*\|\s*Practice/i);
-      if (titleMatch) {
-        title = titleMatch[1].trim();
-      } else {
-        const heading = document.querySelector(".problem-tab__title, [class*='problem-title'], h3, h2, h1");
-        if (heading && heading.textContent) {
-          title = heading.textContent.trim();
-        }
-      }
-
-      const idMatch = slug.match(/(\d+)$/);
-      if (idMatch) problemId = idMatch[1];
-
-      let rawDifficulty = "Easy";
-      const validDiffs = ["school", "basic", "easy", "medium", "hard"];
-      const diffSelectors = ["[class*='problem-tab__difficulty']", "span[class*='difficulty']"];
-      for (const selector of diffSelectors) {
-        const el = document.querySelector(selector);
-        if (el && el.textContent) {
-          const txt = el.textContent.trim().toLowerCase();
-          if (validDiffs.includes(txt)) {
-            rawDifficulty = el.textContent.trim();
-            break;
-          }
-        }
-      }
-
-      let difficulty = "Easy";
-      const cleanDiff = rawDifficulty.toLowerCase();
-      if (cleanDiff === "medium") difficulty = "Medium";
-      else if (cleanDiff === "hard") difficulty = "Hard";
-
-      const topics = [];
-      const topicLinks = document.querySelectorAll('a[href*="category"], a[href*="tag"], [class*="topic-tag"]');
-      topicLinks.forEach((el) => {
-        const txt = el.textContent ? el.textContent.trim() : "";
-        if (txt && txt.length < 30 && !topics.includes(txt)) topics.push(txt);
-      });
-
-      let statement = "";
-      const descSelectors = ["[class*='problem-statement']", "[class*='problemDescription']", "[class*='mark-down']"];
-      for (const selector of descSelectors) {
-        const el = document.querySelector(selector);
-        if (el && el.textContent && el.textContent.trim().length > 30) {
-          statement = el.textContent.trim();
-          break;
-        }
-      }
-
-      const testCases = [];
-      if (statement) {
-        const tcPattern = /Input:\s*([\s\S]*?)Output:\s*([\s\S]*?)(?=Example|Input:|Explanation|Constraints|Note:|\n\n|$)/gi;
-        let match;
-        while ((match = tcPattern.exec(statement)) !== null) {
-          const input = match[1].trim();
-          const output = match[2].trim();
-          if (input || output) testCases.push({ input: input, output: output });
-        }
-      }
-
-      let language = "C++";
-      const knownLangs = ["C++", "Java", "Python3", "Python", "JavaScript", "C#"];
-      const langSelectors = ["[class*='language-select']", "button[class*='lang']", "div[class*='editor'] button"];
-      for (const selector of langSelectors) {
-        const el = document.querySelector(selector);
-        if (el && el.textContent) {
-          const txt = el.textContent.trim();
-          const matched = knownLangs.find((l) => l.toLowerCase() === txt.toLowerCase());
-          if (matched) { language = matched; break; }
-        }
-      }
-
-      let code = "";
-      const aceLines = document.querySelectorAll(".ace_line");
-      const monacoLines = document.querySelectorAll(".view-line");
-      const cmLines = document.querySelectorAll(".cm-line");
-
-      if (aceLines.length > 0) {
-        const lines = [];
-        aceLines.forEach((el) => lines.push((el.textContent || "").replace(/\u00A0/g, " ")));
-        code = lines.join("\n").replace(/\n+$/, "");
-      } else if (monacoLines.length > 0) {
-        const lines = [];
-        monacoLines.forEach((el) => lines.push((el.textContent || "").replace(/\u00A0/g, " ")));
-        code = lines.join("\n").replace(/\n+$/, "");
-      } else if (cmLines.length > 0) {
-        const lines = [];
-        cmLines.forEach((el) => lines.push((el.textContent || "").replace(/\u00A0/g, " ")));
-        code = lines.join("\n").replace(/\n+$/, "");
-      }
-
-      const problemInfo = {
-        problemId: problemId,
-        title: title,
-        slug: slug,
-        platform: "GeeksforGeeks",
-        difficulty: difficulty,
-        topics: topics,
-        primaryTopic: topics.length > 0 ? topics[0] : "General",
-        statement: statement,
-        testCases: testCases,
-        language: language,
-        code: code,
-        acceptedAt: new Date().toISOString(),
-      };
-
-      console.log("[Fika] ✅ GeeksForGeeksAdapter extracted CodingProblem:", problemInfo);
-      return problemInfo;
-    },
-
-    _observer: null,
-
-    startObserving(onAccepted) {
-      let alreadyDetected = false;
-      const scriptLoadTime = Date.now();
-      const INITIAL_IGNORE_PERIOD_MS = 1500;
-
-      const checkDomForAccepted = () => {
-        if (alreadyDetected) return;
-        if (Date.now() - scriptLoadTime < INITIAL_IGNORE_PERIOD_MS) return;
-
-        if (this.isAccepted()) {
-          alreadyDetected = true;
-          console.log("[Fika] ✅ GFG Correct Answer submission detected!");
-          const problemInfo = this.extractProblem();
-          if (onAccepted && typeof onAccepted === "function") {
-            onAccepted(problemInfo);
-          }
-          this.stopObserving();
-        }
-      };
-
-      this._observer = new MutationObserver(() => {
-        checkDomForAccepted();
-      });
-
-      this._observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
-
-      setTimeout(checkDomForAccepted, 2000);
-      console.log("[Fika] GeeksForGeeksAdapter Observer active.");
-    },
-
-    stopObserving() {
-      if (this._observer) {
-        this._observer.disconnect();
-        this._observer = null;
-        console.log("[Fika] GeeksForGeeksAdapter observer disconnected.");
-      }
-    },
-  };
-
-  // ============================================================
-  // GitHub Synchronization Helpers
-  // ============================================================
-
+  // ── Credential reader ──────────────────────────────────────
   function getStoredCredentials() {
-    return new Promise((resolve) => {
+    return new Promise(function (resolve) {
       if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
-        resolve(null);
-        return;
+        return resolve(null);
       }
       chrome.storage.local.get(
         ["fika_github_token", "fika_github_owner", "fika_github_repo"],
-        (result) => {
-          if (result.fika_github_token && result.fika_github_owner && result.fika_github_repo) {
-            resolve({
-              token: result.fika_github_token,
-              owner: result.fika_github_owner,
-              repo: result.fika_github_repo,
-            });
+        function (r) {
+          if (r.fika_github_token && r.fika_github_owner && r.fika_github_repo) {
+            resolve({ token: r.fika_github_token, owner: r.fika_github_owner, repo: r.fika_github_repo });
           } else {
             resolve(null);
           }
@@ -552,272 +73,456 @@
     });
   }
 
-  const TOPIC_ABBREVIATIONS = {
-    DynamicProgramming: "dp",
-    BreadthFirstSearch: "bfs",
-    DepthFirstSearch: "dfs",
-    BinarySearch: "binarysearch",
-    TwoPointers: "twopointers",
-    SlidingWindow: "slidingwindow",
-    LinkedList: "linkedlist",
-    BinaryTree: "binarytree",
-    BinarySearchTree: "bst",
-    HashTable: "hashtable",
+  // ── Path / markdown / duplicate helpers ────────────────────
+  var TOPIC_ABBR = {
+    DynamicProgramming:"dp",BreadthFirstSearch:"bfs",DepthFirstSearch:"dfs",
+    BinarySearch:"binarysearch",TwoPointers:"twopointers",SlidingWindow:"slidingwindow",
+    LinkedList:"linkedlist",BinaryTree:"binarytree",BinarySearchTree:"bst",HashTable:"hashtable"
   };
 
-  function normalizeTopic(topic) {
-    if (!topic) return "General";
-    return topic
-      .split(/[\s\-_]+/)
-      .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
-      .join("")
-      .replace(/[^a-zA-Z0-9]/g, "");
+  function normalizeTopic(t) {
+    if (!t) return "General";
+    return t.split(/[\s\-_]+/).map(function(w){return w.charAt(0).toUpperCase()+w.slice(1);}).join("").replace(/[^a-zA-Z0-9]/g,"");
   }
 
-  function generateFilePath(problem) {
-    const rawTopic = problem.primaryTopic || (problem.topics && problem.topics[0]) || "General";
-    const folderName = normalizeTopic(rawTopic) || "General";
-    const fileName = TOPIC_ABBREVIATIONS[folderName] || folderName.toLowerCase();
-    const diff = problem.difficulty || "Easy";
-    return `${diff}/${folderName}/${fileName}.md`;
+  function generateFilePath(p) {
+    var raw = p.primaryTopic || (p.topics && p.topics[0]) || "General";
+    var folder = normalizeTopic(raw) || "General";
+    var file = TOPIC_ABBR[folder] || folder.toLowerCase();
+    return (p.difficulty||"Easy") + "/" + folder + "/" + file + ".md";
   }
 
-  function formatProblemMarkdown(problem) {
-    const lines = [];
-    lines.push(`## ${problem.problemId}. ${problem.title}`);
-    lines.push("");
-    lines.push(`- **Platform**: ${problem.platform}`);
-    lines.push(`- **Problem ID**: ${problem.problemId}`);
-    lines.push(`- **Difficulty**: ${problem.difficulty}`);
-    lines.push(`- **Language**: ${problem.language}`);
-    lines.push(`- **Topics**: ${problem.topics && problem.topics.length > 0 ? problem.topics.join(", ") : "None"}`);
-    lines.push(`- **Solved**: ${problem.acceptedAt || new Date().toISOString()}`);
-    lines.push("");
-    lines.push("### Problem");
-    lines.push("");
-    lines.push(problem.statement || "*Problem statement not available.*");
-    lines.push("");
-
-    if (problem.testCases && problem.testCases.length > 0) {
-      lines.push("### Test Cases");
-      lines.push("");
-      problem.testCases.forEach((tc, idx) => {
-        lines.push(`#### Test Case ${idx + 1}`);
-        lines.push("");
-        lines.push("**Input:**");
-        lines.push("```");
-        lines.push(tc.input);
-        lines.push("```");
-        lines.push("");
-        lines.push("**Output:**");
-        lines.push("```");
-        lines.push(tc.output);
-        lines.push("```");
-        lines.push("");
+  function formatProblemMarkdown(p) {
+    var langMap = {"C++":"cpp","Python3":"python","Python":"python","Java":"java","JavaScript":"javascript","TypeScript":"typescript"};
+    var mdLang = langMap[p.language] || (p.language||"").toLowerCase();
+    var lines = [
+      "## " + p.problemId + ". " + p.title,
+      "",
+      "- **Platform**: " + p.platform,
+      "- **Problem ID**: " + p.problemId,
+      "- **Difficulty**: " + p.difficulty,
+      "- **Language**: " + p.language,
+      "- **Topics**: " + (p.topics && p.topics.length ? p.topics.join(", ") : "None"),
+      "- **Solved**: " + (p.acceptedAt || new Date().toISOString()),
+      "",
+      "### Problem",
+      "",
+      p.statement || "*Problem statement not available.*",
+      ""
+    ];
+    if (p.testCases && p.testCases.length) {
+      lines.push("### Test Cases","");
+      p.testCases.forEach(function(tc,i){
+        lines.push("#### Test Case "+(i+1),"","**Input:**","```",tc.input,"```","","**Output:**","```",tc.output,"```","");
       });
     }
-
-    const langMap = { "C++": "cpp", "Python3": "python", "Python": "python", "Java": "java", "JavaScript": "javascript", "TypeScript": "typescript" };
-    const mdLang = langMap[problem.language] || (problem.language ? problem.language.toLowerCase() : "");
-
-    lines.push("### Solution");
-    lines.push("");
-    lines.push("```" + mdLang);
-    lines.push(problem.code || "// No code extracted");
-    lines.push("```");
-    lines.push("");
-
+    lines.push("### Solution","","```"+mdLang, p.code||"// No code extracted","```","");
     return lines.join("\n");
   }
 
-  function processDuplicateDetection(existingContent, problem) {
-    const newMarkdown = formatProblemMarkdown(problem);
-    if (!existingContent || !existingContent.trim()) {
-      return { action: "created", content: newMarkdown };
-    }
-
-    const sections = existingContent
-      .split(/(?:^|\n)\s*---\s*(?=\n|$)/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-
-    let existingIndex = -1;
-    let existingCode = "";
-
-    for (let i = 0; i < sections.length; i++) {
-      const platformMatch = sections[i].match(/-\s*\*\*Platform\*\*:\s*([^\r\n]+)/i);
-      const idMatch = sections[i].match(/-\s*\*\*Problem ID\*\*:\s*([^\r\n]+)/i);
-      if (
-        platformMatch &&
-        idMatch &&
-        platformMatch[1].trim().toLowerCase() === problem.platform.toLowerCase() &&
-        idMatch[1].trim() === String(problem.problemId).trim()
-      ) {
-        existingIndex = i;
-        const codeMatch = sections[i].match(/```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/);
-        if (codeMatch) existingCode = codeMatch[1].trim();
+  function processDuplicateDetection(existing, problem) {
+    var md = formatProblemMarkdown(problem);
+    if (!existing || !existing.trim()) return {action:"created",content:md};
+    var sections = existing.split(/(?:^|\n)\s*---\s*(?=\n|$)/).map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
+    var idx=-1, oldCode="";
+    for (var i=0;i<sections.length;i++){
+      var pm=sections[i].match(/-\s*\*\*Platform\*\*:\s*([^\r\n]+)/i);
+      var im=sections[i].match(/-\s*\*\*Problem ID\*\*:\s*([^\r\n]+)/i);
+      if(pm&&im&&pm[1].trim().toLowerCase()===problem.platform.toLowerCase()&&im[1].trim()===String(problem.problemId).trim()){
+        idx=i;
+        var cm=sections[i].match(/```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/);
+        if(cm) oldCode=cm[1].trim();
         break;
       }
     }
-
-    if (existingIndex === -1) {
-      sections.push(newMarkdown);
-      return { action: "created", content: sections.join("\n\n---\n\n") };
-    }
-
-    const normExisting = existingCode.trim().replace(/\r\n/g, "\n");
-    const normNew = (problem.code || "").trim().replace(/\r\n/g, "\n");
-
-    if (normExisting === normNew) {
-      return { action: "skipped", content: existingContent };
-    }
-
-    sections[existingIndex] = newMarkdown;
-    return { action: "updated", content: sections.join("\n\n---\n\n") };
+    if(idx===-1){sections.push(md);return {action:"created",content:sections.join("\n\n---\n\n")};}
+    if(oldCode.replace(/\r\n/g,"\n")===(problem.code||"").trim().replace(/\r\n/g,"\n")) return {action:"skipped",content:existing};
+    sections[idx]=md;
+    return {action:"updated",content:sections.join("\n\n---\n\n")};
   }
 
-  function utf8ToBase64(str) {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(str);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin);
-  }
+  function utf8ToBase64(s){var b=new TextEncoder().encode(s),r="";for(var i=0;i<b.length;i++)r+=String.fromCharCode(b[i]);return btoa(r);}
+  function base64ToUtf8(b){var d=atob(b.replace(/\s/g,""));var a=new Uint8Array(d.length);for(var i=0;i<d.length;i++)a[i]=d.charCodeAt(i);return new TextDecoder().decode(a);}
 
-  function base64ToUtf8(b64) {
-    const cleaned = b64.replace(/\s/g, "");
-    const bin = atob(cleaned);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const decoder = new TextDecoder();
-    return decoder.decode(bytes);
-  }
-
-  function saveMetadataToLocalStorage(problem, filePath, syncStatus, error) {
-    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
-    chrome.storage.local.get(["fika_submissions_map"], (result) => {
-      const map = result.fika_submissions_map || {};
-      const key = `${problem.platform}:${problem.problemId}`;
-      map[key] = {
-        key: key,
-        platform: problem.platform,
-        problemId: problem.problemId,
-        title: problem.title,
-        difficulty: problem.difficulty,
-        topics: problem.topics || [],
-        language: problem.language,
-        acceptedAt: problem.acceptedAt || new Date().toISOString(),
-        githubPath: filePath,
-        syncStatus: syncStatus,
-        error: error || "",
-      };
-      chrome.storage.local.set({ fika_submissions_map: map });
+  function saveMetadata(p, path, status, err) {
+    if (typeof chrome==="undefined"||!chrome.storage||!chrome.storage.local) return;
+    chrome.storage.local.get(["fika_submissions_map"],function(r){
+      var m=r.fika_submissions_map||{};
+      var k=p.platform+":"+p.problemId;
+      m[k]={key:k,platform:p.platform,problemId:p.problemId,title:p.title,difficulty:p.difficulty,
+        topics:p.topics||[],language:p.language,acceptedAt:p.acceptedAt||new Date().toISOString(),
+        githubPath:path,syncStatus:status,error:err||""};
+      chrome.storage.local.set({fika_submissions_map:m});
     });
   }
 
-  async function syncProblemToGitHub(problem, creds) {
-    const filePath = generateFilePath(problem);
-    console.log("[Fika Sync] Target repository path:", filePath);
-
-    const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
-    const apiUrl = `https://api.github.com/repos/${creds.owner}/${creds.repo}/contents/${encodedPath}`;
-    const headers = {
-      Authorization: "Bearer " + creds.token,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2022-11-28",
+  // ── GitHub push ────────────────────────────────────────────
+  async function syncToGitHub(problem, creds) {
+    var filePath = generateFilePath(problem);
+    console.log("[Fika Sync] Target:", filePath);
+    var encoded = filePath.split("/").map(encodeURIComponent).join("/");
+    var url = "https://api.github.com/repos/"+creds.owner+"/"+creds.repo+"/contents/"+encoded;
+    var hdrs = {
+      Authorization:"Bearer "+creds.token,
+      Accept:"application/vnd.github+json",
+      "Content-Type":"application/json",
+      "X-GitHub-Api-Version":"2022-11-28"
     };
 
-    let existingContent = "";
-    let sha = null;
-
+    var existing="", sha=null;
     try {
-      const res = await fetch(apiUrl, { method: "GET", headers: headers });
-      if (res.ok) {
-        const data = await res.json();
-        sha = data.sha;
-        existingContent = base64ToUtf8(data.content || "");
-      } else if (res.status !== 404) {
-        const errTxt = await res.text();
-        saveMetadataToLocalStorage(problem, filePath, "failed", `GitHub GET ${res.status}`);
-        return { success: false, error: `GitHub API error ${res.status}: ${errTxt}` };
+      var gr = await fetch(url,{method:"GET",headers:hdrs});
+      if (gr.ok) { var gd=await gr.json(); sha=gd.sha; existing=base64ToUtf8(gd.content||""); }
+      else if (gr.status!==404) { saveMetadata(problem,filePath,"failed","GET "+gr.status); return {success:false,error:"GitHub GET "+gr.status}; }
+    } catch(e) { saveMetadata(problem,filePath,"failed","Network GET"); return {success:false,error:"Network error (GET)"}; }
+
+    var det = processDuplicateDetection(existing,problem);
+    if (det.action==="skipped") { console.log("[Fika Sync] Identical → skip"); saveMetadata(problem,filePath,"synced"); return {success:true,action:"skipped"}; }
+
+    var body = {message:(det.action==="created"?"Add":"Update")+" "+problem.platform+" "+problem.problemId+": "+problem.title+" ["+problem.difficulty+"]",content:utf8ToBase64(det.content)};
+    if (sha) body.sha=sha;
+    try {
+      var pr = await fetch(url,{method:"PUT",headers:hdrs,body:JSON.stringify(body)});
+      if (!pr.ok) { var et=await pr.text(); saveMetadata(problem,filePath,"failed","PUT "+pr.status); return {success:false,error:"PUT "+pr.status+": "+et}; }
+      var pd=await pr.json(); saveMetadata(problem,filePath,"synced");
+      console.log("[Fika Sync] 🎉 SUCCESS →", filePath);
+      return {success:true,action:det.action,commitSha:pd.commit&&pd.commit.sha};
+    } catch(e){ saveMetadata(problem,filePath,"failed","Network PUT"); return {success:false,error:"Network error (PUT)"}; }
+  }
+
+  // ── Core sync pipeline (called by adapters) ────────────────
+  async function runSyncPipeline(problem) {
+    var key = problem.platform+":"+problem.problemId+":"+(problem.code||"").slice(0,60);
+    if (key===lastSyncedKey) { console.log("[Fika] Duplicate sync suppressed"); return; }
+    lastSyncedKey = key;
+
+    console.log("[Fika] 🚀 Syncing:", problem.platform, "#"+problem.problemId, problem.title);
+    showToast('Fika: 🚀 Syncing "'+problem.title+'" to GitHub…', "info");
+
+    var creds = await getStoredCredentials();
+    if (!creds) {
+      console.warn("[Fika] ⚠️ No GitHub credentials configured.");
+      showToast("Fika: ⚠️ GitHub credentials missing! Open extension to configure.", "warning");
+      return;
+    }
+
+    var result = await syncToGitHub(problem, creds);
+    if (result.success) {
+      console.log("[Fika] ✅ SYNC COMPLETE [" + result.action + "]");
+      showToast("Fika: 🎉 Pushed to GitHub! (" + result.action + ")", "success");
+    } else {
+      console.error("[Fika] ❌ SYNC FAILED:", result.error);
+      showToast("Fika: ❌ Push failed — " + result.error, "error");
+    }
+  }
+
+  // ── Code extraction (works for Monaco, CodeMirror 6, Ace) ──
+  function extractCodeFromEditor() {
+    // Monaco (.view-line)
+    var els = document.querySelectorAll(".view-lines .view-line");
+    if (els.length > 0) {
+      var lines = [];
+      els.forEach(function(el){ lines.push((el.textContent||"").replace(/\u00A0/g," ")); });
+      return lines.join("\n").replace(/\n+$/,"");
+    }
+    // CodeMirror 6 (.cm-line)
+    els = document.querySelectorAll(".cm-line");
+    if (els.length > 0) {
+      var lines2 = [];
+      els.forEach(function(el){ lines2.push((el.textContent||"").replace(/\u00A0/g," ")); });
+      return lines2.join("\n").replace(/\n+$/,"");
+    }
+    // Ace (.ace_line)
+    els = document.querySelectorAll(".ace_line");
+    if (els.length > 0) {
+      var lines3 = [];
+      els.forEach(function(el){ lines3.push((el.textContent||"").replace(/\u00A0/g," ")); });
+      return lines3.join("\n").replace(/\n+$/,"");
+    }
+    return "";
+  }
+
+  // ================================================================
+  // LEETCODE ADAPTER
+  // Strategy: Monkey-patch window.fetch to intercept LeetCode's own
+  // submission API response. When /check/ returns status_msg "Accepted"
+  // we know for certain the submission was accepted — no DOM guessing.
+  // ================================================================
+  function initLeetCode() {
+    console.log("[Fika] Initializing LeetCode adapter (fetch-intercept strategy)");
+
+    function extractLeetCodeProblem() {
+      var problemId = "Unknown", title = "Unknown";
+      var m = document.title.match(/(\d+)\.\s*(.+?)\s*[-–—]\s*LeetCode/);
+      if (m) { problemId = m[1]; title = m[2].trim(); }
+      else {
+        var hdgs = document.querySelectorAll("[class*='title'], h1, h2, h3");
+        for (var h of hdgs) {
+          var hm = h.textContent.trim().match(/^(\d+)\.\s*(.+)/);
+          if (hm) { problemId = hm[1]; title = hm[2].trim(); break; }
+        }
       }
-    } catch (err) {
-      saveMetadataToLocalStorage(problem, filePath, "failed", "Network error during GET");
-      return { success: false, error: "Network error fetching file from GitHub." };
-    }
 
-    const detect = processDuplicateDetection(existingContent, problem);
-    if (detect.action === "skipped") {
-      console.log(`[Fika Sync] ℹ️ Problem ${problem.platform} #${problem.problemId} is identical. Skipping GitHub commit.`);
-      saveMetadataToLocalStorage(problem, filePath, "synced");
-      return { success: true, action: "skipped" };
-    }
+      var um = window.location.href.match(/leetcode\.com\/problems\/([a-z0-9-]+)/i);
+      var slug = um ? um[1] : "unknown";
+      if (title === "Unknown") title = slug.split("-").map(function(w){return w.charAt(0).toUpperCase()+w.slice(1);}).join(" ");
 
-    const commitMsg = `${detect.action === "created" ? "Add" : "Update"} ${problem.platform} ${problem.problemId}: ${problem.title} [${problem.difficulty}]`;
-    const payload = {
-      message: commitMsg,
-      content: utf8ToBase64(detect.content),
-    };
-    if (sha) payload.sha = sha;
+      var difficulty = "Easy";
+      var diffs = ["Easy","Medium","Hard"];
+      var allEls = document.querySelectorAll("div, span");
+      for (var el of allEls) {
+        if (el.children.length > 0) continue;
+        var t = (el.textContent||"").trim();
+        if (diffs.indexOf(t) !== -1) { difficulty = t; break; }
+      }
 
-    try {
-      const putRes = await fetch(apiUrl, {
-        method: "PUT",
-        headers: headers,
-        body: JSON.stringify(payload),
+      var topics = [];
+      document.querySelectorAll('a[href*="/tag/"]').forEach(function(el){
+        var tt = el.textContent.trim();
+        if (tt && topics.indexOf(tt)===-1) topics.push(tt);
       });
 
-      if (!putRes.ok) {
-        const errorBody = await putRes.text();
-        saveMetadataToLocalStorage(problem, filePath, "failed", `PUT error ${putRes.status}`);
-        return { success: false, error: `GitHub PUT error ${putRes.status}: ${errorBody}` };
+      var statement = "";
+      var descSel = ['[data-track-load="description_content"]','div[class*="elfjS"]','div[class*="question-content"]','div[class*="description"]'];
+      for (var sel of descSel) {
+        try { var de = document.querySelector(sel);
+          if (de && de.textContent.trim().length > 50) { statement = de.textContent.trim(); break; }
+        } catch(e){}
       }
 
-      const putData = await putRes.json();
-      saveMetadataToLocalStorage(problem, filePath, "synced");
-      console.log(`[Fika Sync] 🎉 SUCCESS! Synced ${problem.platform} #${problem.problemId} (${problem.title}) to ${creds.owner}/${creds.repo} -> ${filePath}`);
-      return { success: true, action: detect.action, commitSha: putData.commit?.sha };
-    } catch (err) {
-      saveMetadataToLocalStorage(problem, filePath, "failed", "Network error during PUT");
-      return { success: false, error: "Network error pushing to GitHub." };
+      var testCases = [];
+      if (statement) {
+        var tp = /Input:\s*([\s\S]*?)Output:\s*([\s\S]*?)(?=Example|Input:|Explanation|Constraints|Note:|\n\n|$)/gi;
+        var tcm;
+        while ((tcm = tp.exec(statement)) !== null) {
+          if (tcm[1].trim() || tcm[2].trim()) testCases.push({input:tcm[1].trim(),output:tcm[2].trim()});
+        }
+      }
+
+      var language = "C++";
+      var knownLangs = ["C++","Java","Python","Python3","C","C#","JavaScript","TypeScript","PHP","Swift","Kotlin","Dart","Go","Ruby","Scala","Rust"];
+      document.querySelectorAll("button").forEach(function(btn){
+        if (language !== "C++") return;
+        var bt = btn.textContent.trim();
+        if (knownLangs.indexOf(bt) !== -1) language = bt;
+      });
+
+      var code = extractCodeFromEditor();
+
+      return {
+        problemId: problemId, title: title, slug: slug, platform: "LeetCode",
+        difficulty: difficulty, topics: topics,
+        primaryTopic: topics.length > 0 ? topics[0] : "General",
+        statement: statement, testCases: testCases, language: language,
+        code: code, acceptedAt: new Date().toISOString()
+      };
     }
+
+    // ── Monkey-patch fetch to intercept submission check responses ──
+    var originalFetch = window.fetch;
+    var pendingSubmissionId = null;
+
+    window.fetch = function() {
+      var fetchUrl = arguments[0];
+      var opts = arguments[1] || {};
+
+      // Detect the submission POST → /submit/
+      if (typeof fetchUrl === "string" && /\/problems\/[^/]+\/submit\/?$/i.test(fetchUrl) && (opts.method||"").toUpperCase() === "POST") {
+        console.log("[Fika] 📤 LeetCode submission POST detected:", fetchUrl);
+        showToast("Fika: ⏳ Submission detected, watching for result…", "info");
+
+        return originalFetch.apply(this, arguments).then(function(response) {
+          // Clone so we can read the body without consuming it
+          var cloned = response.clone();
+          cloned.json().then(function(data) {
+            if (data && data.submission_id) {
+              pendingSubmissionId = String(data.submission_id);
+              console.log("[Fika] 📝 Got submission_id:", pendingSubmissionId);
+            }
+          }).catch(function(){});
+          return response;
+        });
+      }
+
+      // Detect the check poll → /submissions/detail/{id}/check/
+      if (typeof fetchUrl === "string" && /\/submissions\/detail\/\d+\/check\/?/i.test(fetchUrl)) {
+        return originalFetch.apply(this, arguments).then(function(response) {
+          var cloned = response.clone();
+          cloned.json().then(function(data) {
+            if (data && data.state === "SUCCESS" && data.status_msg === "Accepted") {
+              console.log("[Fika] ✅ LeetCode API confirmed ACCEPTED! submission_id:", data.submission_id || "unknown");
+
+              // Small delay so LeetCode finishes rendering (and we can read the code editor)
+              setTimeout(function() {
+                var problem = extractLeetCodeProblem();
+                console.log("[Fika] Extracted problem:", problem);
+                runSyncPipeline(problem);
+              }, 1500);
+            }
+          }).catch(function(){});
+          return response;
+        });
+      }
+
+      return originalFetch.apply(this, arguments);
+    };
+
+    console.log("[Fika] ✅ LeetCode fetch-intercept active. Waiting for submissions…");
   }
 
-  // ============================================================
-  // Main Execution Loop
-  // ============================================================
-  const registeredAdapters = [LeetCodeAdapter, GeeksForGeeksAdapter];
+  // ================================================================
+  // GEEKSFORGEEKS ADAPTER
+  // Strategy: Listen for Submit click, then poll DOM for result text.
+  // ================================================================
+  function initGFG() {
+    console.log("[Fika] Initializing GeeksforGeeks adapter (click + DOM poll strategy)");
 
-  const currentUrl = window.location.href;
-  const activeAdapter = registeredAdapters.find((adapter) =>
-    adapter.matchesUrl(currentUrl)
-  );
+    function extractGFGProblem() {
+      var urlMatch = window.location.href.match(/geeksforgeeks\.org\/problems\/([a-z0-9-]+)/i);
+      var slug = urlMatch ? urlMatch[1] : "unknown-gfg";
+      var title = "Unknown Problem", problemId = slug;
 
-  if (activeAdapter) {
-    console.log("[Fika] Active adapter found:", activeAdapter.platformName);
-    activeAdapter.startObserving(async (problem) => {
-      console.log("[Fika] ✅ ACCEPTED submission detected! Extracting problem:", problem.title);
-      showToast(`Fika: 🚀 Accepted submission detected! Syncing "${problem.title}"...`, "info");
+      var tm = document.title.match(/^([^|]+)\s*\|\s*Practice/i);
+      if (tm) title = tm[1].trim();
+      else {
+        var h = document.querySelector("[class*='problem-title'], .problem-tab__title, h3, h2, h1");
+        if (h && h.textContent) title = h.textContent.trim();
+      }
+      var im = slug.match(/(\d+)$/);
+      if (im) problemId = im[1];
 
-      const creds = await getStoredCredentials();
-      if (!creds) {
-        console.warn("[Fika] ⚠️ Sync skipped: GitHub credentials not configured.");
-        showToast("Fika: ⚠️ GitHub credentials missing! Click extension icon to configure.", "warning");
-        return;
+      var difficulty = "Easy";
+      var ds = document.querySelector("[class*='difficulty'], [class*='problem-tab__difficulty']");
+      if (ds) {
+        var dt = ds.textContent.trim().toLowerCase();
+        if (dt === "medium") difficulty = "Medium";
+        else if (dt === "hard") difficulty = "Hard";
       }
 
-      console.log(`[Fika] Syncing problem to GitHub repo ${creds.owner}/${creds.repo}...`);
-      const result = await syncProblemToGitHub(problem, creds);
-      if (result.success) {
-        console.log(`[Fika] ✅ SYNC COMPLETE! [Action: ${result.action}]`);
-        showToast(`Fika: 🎉 Solution pushed to GitHub! (${result.action})`, "success");
-      } else {
-        console.error(`[Fika] ❌ SYNC FAILED: ${result.error}`);
-        showToast(`Fika: ❌ Push failed: ${result.error}`, "error");
+      var topics = [];
+      document.querySelectorAll('a[href*="category"], a[href*="tag"], [class*="topic-tag"]').forEach(function(el){
+        var t = (el.textContent||"").trim();
+        if (t && t.length < 30 && topics.indexOf(t)===-1) topics.push(t);
+      });
+
+      var statement = "";
+      var dSel = ["[class*='problem-statement']","[class*='problemDescription']","[class*='mark-down']"];
+      for (var s of dSel) {
+        var e = document.querySelector(s);
+        if (e && e.textContent && e.textContent.trim().length > 30) { statement = e.textContent.trim(); break; }
       }
-    });
+
+      var testCases = [];
+      if (statement) {
+        var tp = /Input:\s*([\s\S]*?)Output:\s*([\s\S]*?)(?=Example|Input:|Explanation|Constraints|Note:|\n\n|$)/gi;
+        var tcm;
+        while ((tcm = tp.exec(statement)) !== null) {
+          if (tcm[1].trim()||tcm[2].trim()) testCases.push({input:tcm[1].trim(),output:tcm[2].trim()});
+        }
+      }
+
+      var language = "C++";
+      var knownLangs = ["C++","Java","Python3","Python","JavaScript","C#"];
+      var langSels = ["[class*='language-select']","button[class*='lang']","div[class*='editor'] button"];
+      for (var ls of langSels) {
+        var le = document.querySelector(ls);
+        if (le && le.textContent) {
+          var lt = le.textContent.trim();
+          var ml = knownLangs.find(function(l){return l.toLowerCase()===lt.toLowerCase();});
+          if (ml) { language = ml; break; }
+        }
+      }
+
+      var code = extractCodeFromEditor();
+
+      return {
+        problemId: problemId, title: title, slug: slug, platform: "GeeksforGeeks",
+        difficulty: difficulty, topics: topics,
+        primaryTopic: topics.length > 0 ? topics[0] : "General",
+        statement: statement, testCases: testCases, language: language,
+        code: code, acceptedAt: new Date().toISOString()
+      };
+    }
+
+    // Watch for Submit click → then poll DOM for "Correct Answer"
+    var isWaitingForResult = false;
+
+    document.addEventListener("click", function(e) {
+      var el = e.target;
+      if (!el) return;
+      var btn = el.closest("button, [role='button']");
+      if (!btn) return;
+      var text = (btn.textContent || "").trim().toLowerCase();
+      if (text.indexOf("submit") !== -1 || btn.id === "run-and-submit-btn" ||
+          (btn.className && typeof btn.className === "string" && btn.className.toLowerCase().indexOf("submit") !== -1)) {
+        console.log("[Fika] 📤 GFG Submit button clicked");
+        showToast("Fika: ⏳ Submission detected, watching for result…", "info");
+        isWaitingForResult = true;
+        pollForGFGResult();
+      }
+    }, true);
+
+    document.addEventListener("keydown", function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        console.log("[Fika] 📤 GFG Submit via Ctrl+Enter");
+        isWaitingForResult = true;
+        pollForGFGResult();
+      }
+    }, true);
+
+    function pollForGFGResult() {
+      var attempts = 0;
+      var maxAttempts = 40; // 40 × 500ms = 20 seconds
+      var interval = setInterval(function() {
+        attempts++;
+        if (attempts > maxAttempts) {
+          clearInterval(interval);
+          isWaitingForResult = false;
+          console.log("[Fika] ⏱ GFG result poll timed out after 20s");
+          return;
+        }
+
+        // Scan for success text
+        var allText = document.body.innerText || "";
+        if (/Correct Answer|Problem Solved Successfully/i.test(allText)) {
+          clearInterval(interval);
+          isWaitingForResult = false;
+          console.log("[Fika] ✅ GFG Correct Answer detected!");
+
+          setTimeout(function() {
+            var problem = extractGFGProblem();
+            console.log("[Fika] Extracted GFG problem:", problem);
+            runSyncPipeline(problem);
+          }, 1000);
+        }
+      }, 500);
+    }
+
+    // Also try intercepting GFG's fetch/XHR for compile results
+    var origFetch = window.fetch;
+    window.fetch = function() {
+      var fetchUrl = arguments[0];
+      if (typeof fetchUrl === "string" && /api\/latest\/problems-auth\/submit/i.test(fetchUrl)) {
+        console.log("[Fika] 📤 GFG submission API call detected:", fetchUrl);
+        isWaitingForResult = true;
+        showToast("Fika: ⏳ Submission detected, watching for result…", "info");
+      }
+      return origFetch.apply(this, arguments);
+    };
+
+    console.log("[Fika] ✅ GFG adapter active. Watching for Submit clicks…");
+  }
+
+  // ================================================================
+  // ROUTER — pick the right adapter based on hostname
+  // ================================================================
+  var host = window.location.hostname;
+
+  if (host.indexOf("leetcode.com") !== -1 && /\/problems\/[a-z0-9-]+/i.test(window.location.pathname)) {
+    initLeetCode();
+  } else if (host.indexOf("geeksforgeeks.org") !== -1 && /\/problems\/[a-z0-9-]+/i.test(window.location.pathname)) {
+    initGFG();
   } else {
-    console.log("[Fika] No matching platform adapter for URL:", currentUrl);
+    console.log("[Fika] Not a supported problem page:", window.location.href);
   }
 })();

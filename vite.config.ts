@@ -9,6 +9,7 @@ function copyExtensionFiles() {
     writeBundle() {
       fs.copyFileSync(resolve(__dirname, 'manifest.json'), resolve(__dirname, 'dist/manifest.json'));
       fs.copyFileSync(resolve(__dirname, 'content.js'), resolve(__dirname, 'dist/content.js'));
+      fs.copyFileSync(resolve(__dirname, 'inject.js'), resolve(__dirname, 'dist/inject.js'));
     },
   };
 }

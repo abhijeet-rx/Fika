@@ -1,23 +1,17 @@
 // ============================================================
-// Fika Content Script — v4
+// Fika Content Script — v4.1
 //
-// Chrome content scripts run in an ISOLATED JavaScript world.
-// They share the DOM but NOT the JS globals with the page.
-// Therefore we CANNOT monkey-patch window.fetch from here.
+// Runs in the ISOLATED world (default). Has access to
+// chrome.storage.local for GitHub credentials.
 //
-// Strategy:
-//   1. Inject a <script> into the PAGE's main world that patches
-//      the real window.fetch and fires a CustomEvent when LeetCode's
-//      submission-check API returns "Accepted".
-//   2. This content script listens for that CustomEvent, reads the
-//      DOM to extract problem info, reads chrome.storage for creds,
-//      and pushes to GitHub.
+// Listens for CustomEvents fired by inject.js (which runs
+// in the MAIN world and intercepts fetch/XHR).
 // ============================================================
 
 (function () {
   "use strict";
 
-  console.log("[Fika] Content script v4 loaded on:", window.location.href);
+  console.log("[Fika] Content script v4.1 loaded on:", window.location.href);
 
   // ── Toast helper ───────────────────────────────────────────
   function showToast(message, type) {
@@ -53,7 +47,7 @@
     }, 6000);
   }
 
-  // ── Credential reader (only works in content script world) ─
+  // ── Credential reader ──────────────────────────────────────
   function getStoredCredentials() {
     return new Promise(function (resolve) {
       if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
@@ -72,7 +66,7 @@
     });
   }
 
-  // ── Code extraction (reads DOM — works from content script) ─
+  // ── Code extraction ────────────────────────────────────────
   function extractCodeFromEditor() {
     var selectors = [".view-lines .view-line", ".view-line", ".cm-line", ".ace_line"];
     for (var s = 0; s < selectors.length; s++) {
@@ -169,8 +163,8 @@
       var h = document.querySelector("[class*='problem-title'], .problem-tab__title, h3, h2, h1");
       if (h && h.textContent) title = h.textContent.trim();
     }
-    var im = slug.match(/(\d+)$/);
-    if (im) problemId = im[1];
+    var idm = slug.match(/(\d+)$/);
+    if (idm) problemId = idm[1];
 
     var difficulty = "Easy";
     var ds = document.querySelector("[class*='difficulty'], [class*='problem-tab__difficulty']");
@@ -275,8 +269,8 @@
     var idx = -1, oldCode = "";
     for (var i = 0; i < sections.length; i++) {
       var pm = sections[i].match(/-\s*\*\*Platform\*\*:\s*([^\r\n]+)/i);
-      var idm = sections[i].match(/-\s*\*\*Problem ID\*\*:\s*([^\r\n]+)/i);
-      if (pm && idm && pm[1].trim().toLowerCase() === problem.platform.toLowerCase() && idm[1].trim() === String(problem.problemId).trim()) {
+      var im = sections[i].match(/-\s*\*\*Problem ID\*\*:\s*([^\r\n]+)/i);
+      if (pm && im && pm[1].trim().toLowerCase() === problem.platform.toLowerCase() && im[1].trim() === String(problem.problemId).trim()) {
         idx = i;
         var cm = sections[i].match(/```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/);
         if (cm) oldCode = cm[1].trim();
@@ -340,7 +334,7 @@
     } catch (e) { saveMetadata(problem, filePath, "failed", "Network PUT"); return { success: false, error: "Network error (PUT)" }; }
   }
 
-  // ── Deduplication ──────────────────────────────────────────
+  // ── Deduplication & sync pipeline ──────────────────────────
   var lastSyncedKey = "";
 
   async function runSyncPipeline(problem) {
@@ -369,179 +363,31 @@
   }
 
   // ================================================================
-  // INJECTED MAIN-WORLD SCRIPT
-  //
-  // This code is serialized to a string, injected into the page via
-  // a <script> tag, and runs in the PAGE's JavaScript world — where
-  // it can intercept the REAL window.fetch that LeetCode uses.
-  //
-  // Communication back to the content script is via CustomEvent on
-  // the document.
+  // EVENT LISTENERS — receive signals from inject.js (main world)
   // ================================================================
-  var INJECTED_CODE = function () {
-    if (window.__fikaInjected) return;
-    window.__fikaInjected = true;
+  var host = window.location.hostname;
 
-    var originalFetch = window.fetch;
-
-    window.fetch = function () {
-      var url = (typeof arguments[0] === "string") ? arguments[0] : (arguments[0] && arguments[0].url ? arguments[0].url : "");
-      var opts = arguments[1] || {};
-      var method = (opts.method || "GET").toUpperCase();
-
-      // ── LeetCode: detect submission POST ──
-      if (/\/problems\/[^/]+\/submit\/?$/i.test(url) && method === "POST") {
-        console.log("[Fika-inject] 📤 Submission POST detected:", url);
-        document.dispatchEvent(new CustomEvent("__fika_submit_detected"));
-
-        return originalFetch.apply(this, arguments).then(function (response) {
-          var cloned = response.clone();
-          cloned.json().then(function (data) {
-            if (data && data.submission_id) {
-              console.log("[Fika-inject] 📝 submission_id:", data.submission_id);
-            }
-          }).catch(function () { });
-          return response;
-        });
-      }
-
-      // ── LeetCode: detect check-result poll ──
-      if (/\/submissions\/detail\/\d+\/check\/?/i.test(url)) {
-        return originalFetch.apply(this, arguments).then(function (response) {
-          var cloned = response.clone();
-          cloned.json().then(function (data) {
-            if (data && data.state === "SUCCESS" && data.status_msg === "Accepted") {
-              console.log("[Fika-inject] ✅ Accepted confirmed by API!");
-              document.dispatchEvent(new CustomEvent("__fika_accepted", {
-                detail: { submissionId: data.submission_id, runtime: data.status_runtime, memory: data.status_memory }
-              }));
-            }
-          }).catch(function () { });
-          return response;
-        });
-      }
-
-      // ── LeetCode: GraphQL submissions ──
-      if (/\/graphql\/?$/i.test(url) && method === "POST") {
-        return originalFetch.apply(this, arguments).then(function (response) {
-          var cloned = response.clone();
-          cloned.text().then(function (text) {
-            try {
-              var json = JSON.parse(text);
-              // Check for submission mutation response
-              if (json && json.data && json.data.submissionId) {
-                console.log("[Fika-inject] 📝 GraphQL submission_id:", json.data.submissionId);
-              }
-              // Check for submission check via GraphQL
-              if (json && json.data && json.data.submissionDetails && json.data.submissionDetails.statusDisplay === "Accepted") {
-                console.log("[Fika-inject] ✅ GraphQL Accepted confirmed!");
-                document.dispatchEvent(new CustomEvent("__fika_accepted", {
-                  detail: { submissionId: json.data.submissionDetails.id }
-                }));
-              }
-            } catch (e) { }
-          }).catch(function () { });
-          return response;
-        });
-      }
-
-      // ── GFG: detect submission API ──
-      if (/geeksforgeeks/i.test(window.location.hostname) && /submit|run/i.test(url) && method === "POST") {
-        console.log("[Fika-inject] 📤 GFG submission detected:", url);
-        document.dispatchEvent(new CustomEvent("__fika_submit_detected"));
-      }
-
-      return originalFetch.apply(this, arguments);
-    };
-
-    // ── Also intercept XMLHttpRequest for older API paths ──
-    var origXHROpen = XMLHttpRequest.prototype.open;
-    var origXHRSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function (method, url) {
-      this.__fikaUrl = url;
-      this.__fikaMethod = method;
-      return origXHROpen.apply(this, arguments);
-    };
-
-    XMLHttpRequest.prototype.send = function () {
-      var self = this;
-      var url = self.__fikaUrl || "";
-
-      if (/\/problems\/[^/]+\/submit\/?$/i.test(url)) {
-        console.log("[Fika-inject] 📤 XHR Submission detected:", url);
-        document.dispatchEvent(new CustomEvent("__fika_submit_detected"));
-      }
-
-      self.addEventListener("load", function () {
-        try {
-          if (/\/submissions\/detail\/\d+\/check\/?/i.test(url)) {
-            var data = JSON.parse(self.responseText);
-            if (data && data.state === "SUCCESS" && data.status_msg === "Accepted") {
-              console.log("[Fika-inject] ✅ XHR Accepted confirmed!");
-              document.dispatchEvent(new CustomEvent("__fika_accepted", {
-                detail: { submissionId: data.submission_id }
-              }));
-            }
-          }
-        } catch (e) { }
-      });
-
-      return origXHRSend.apply(this, arguments);
-    };
-
-    console.log("[Fika-inject] ✅ Main-world fetch/XHR interceptors active");
-  };
-
-  // ── Inject the script into the page's main world ───────────
-  function injectMainWorldScript() {
-    var script = document.createElement("script");
-    script.textContent = "(" + INJECTED_CODE.toString() + ")();";
-    (document.head || document.documentElement).appendChild(script);
-    script.remove(); // Clean up the tag (the code already executed)
-    console.log("[Fika] Injected main-world interceptor script");
-  }
-
-  // ================================================================
-  // LEETCODE ADAPTER
-  // ================================================================
-  function initLeetCode() {
-    console.log("[Fika] Initializing LeetCode adapter");
-    injectMainWorldScript();
-
-    // Listen for the Accepted event from the injected script
-    document.addEventListener("__fika_accepted", function () {
-      console.log("[Fika] ✅ Received __fika_accepted event from main world!");
-
-      // Delay slightly so the DOM has updated with the result
-      setTimeout(function () {
-        var problem = extractLeetCodeProblem();
-        console.log("[Fika] Extracted problem:", JSON.stringify({
-          id: problem.problemId,
-          title: problem.title,
-          difficulty: problem.difficulty,
-          language: problem.language,
-          codeLength: (problem.code || "").length,
-          topics: problem.topics
-        }));
-        runSyncPipeline(problem);
-      }, 2000);
-    });
+  if (host.indexOf("leetcode.com") !== -1 && /\/problems\/[a-z0-9-]/i.test(window.location.pathname)) {
+    console.log("[Fika] LeetCode problem page detected — listening for events from inject.js");
 
     document.addEventListener("__fika_submit_detected", function () {
       console.log("[Fika] 📤 Submit detected — watching for result…");
       showToast("Fika: ⏳ Submission sent! Watching for result…", "info");
     });
 
-    console.log("[Fika] ✅ LeetCode adapter ready. Waiting for submissions…");
-  }
+    document.addEventListener("__fika_accepted", function () {
+      console.log("[Fika] ✅ Received __fika_accepted from inject.js!");
+      setTimeout(function () {
+        var problem = extractLeetCodeProblem();
+        console.log("[Fika] Extracted:", problem.problemId, problem.title, "code length:", (problem.code || "").length);
+        runSyncPipeline(problem);
+      }, 2000);
+    });
 
-  // ================================================================
-  // GFG ADAPTER
-  // ================================================================
-  function initGFG() {
-    console.log("[Fika] Initializing GFG adapter");
-    injectMainWorldScript();
+    console.log("[Fika] ✅ LeetCode adapter ready.");
+
+  } else if (host.indexOf("geeksforgeeks.org") !== -1 && /\/problems\/[a-z0-9-]/i.test(window.location.pathname)) {
+    console.log("[Fika] GFG problem page detected");
 
     var isPolling = false;
 
@@ -549,36 +395,25 @@
       if (isPolling) return;
       isPolling = true;
       var attempts = 0;
-      var maxAttempts = 40;
       var interval = setInterval(function () {
         attempts++;
-        if (attempts > maxAttempts) {
-          clearInterval(interval);
-          isPolling = false;
-          console.log("[Fika] ⏱ GFG result poll timed out");
-          return;
-        }
+        if (attempts > 40) { clearInterval(interval); isPolling = false; return; }
         var bodyText = document.body.innerText || "";
         if (/Correct Answer|Problem Solved Successfully/i.test(bodyText)) {
           clearInterval(interval);
           isPolling = false;
           console.log("[Fika] ✅ GFG Correct Answer detected!");
-          setTimeout(function () {
-            var problem = extractGFGProblem();
-            runSyncPipeline(problem);
-          }, 1000);
+          setTimeout(function () { runSyncPipeline(extractGFGProblem()); }, 1000);
         }
       }, 500);
     }
 
-    // Listen for submit detection from injected script
     document.addEventListener("__fika_submit_detected", function () {
       console.log("[Fika] 📤 GFG Submit detected — polling for result…");
       showToast("Fika: ⏳ Submission sent! Watching for result…", "info");
       startGFGPoll();
     });
 
-    // Also listen for button clicks directly
     document.addEventListener("click", function (e) {
       var el = e.target;
       if (!el) return;
@@ -586,31 +421,17 @@
       if (!btn) return;
       var text = (btn.textContent || "").trim().toLowerCase();
       if (text.indexOf("submit") !== -1 || btn.id === "run-and-submit-btn") {
-        console.log("[Fika] 📤 GFG Submit button clicked");
-        showToast("Fika: ⏳ Submission sent! Watching for result…", "info");
         startGFGPoll();
       }
     }, true);
 
     document.addEventListener("keydown", function (e) {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        startGFGPoll();
-      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") startGFGPoll();
     }, true);
 
-    console.log("[Fika] ✅ GFG adapter ready. Watching for submissions…");
-  }
+    console.log("[Fika] ✅ GFG adapter ready.");
 
-  // ================================================================
-  // ROUTER
-  // ================================================================
-  var host = window.location.hostname;
-
-  if (host.indexOf("leetcode.com") !== -1 && /\/problems\/[a-z0-9-]/i.test(window.location.pathname)) {
-    initLeetCode();
-  } else if (host.indexOf("geeksforgeeks.org") !== -1 && /\/problems\/[a-z0-9-]/i.test(window.location.pathname)) {
-    initGFG();
   } else {
-    console.log("[Fika] Not a supported problem page:", window.location.href);
+    console.log("[Fika] Not a supported problem page.");
   }
 })();

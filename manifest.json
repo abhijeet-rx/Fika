@@ -23,6 +23,17 @@
         "https://*.geeksforgeeks.org/*"
       ],
       "js": [
+        "inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://leetcode.com/*",
+        "https://*.geeksforgeeks.org/*"
+      ],
+      "js": [
         "content.js"
       ],
       "run_at": "document_idle"

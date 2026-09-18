@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Fika - Coding Problem Sync",
+  "version": "1.0.0",
+  "description": "Automatically sync accepted coding solutions from LeetCode and other platforms directly to your GitHub repository.",
+  "action": {
+    "default_title": "Fika Dashboard",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "https://*.geeksforgeeks.org/*",
+    "https://api.github.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://leetcode.com/*",
+        "https://*.geeksforgeeks.org/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

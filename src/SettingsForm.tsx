@@ -183,6 +183,8 @@ export function SettingsForm(props: { onSaved?: () => void }) {
   const [settings, setSettings] = useState<FikaSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
+  const [verifiedUsername, setVerifiedUsername] = useState<string | null>(null);
+  const [isConnected, setIsConnected] = useState<boolean>(false);
   const [message, setMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
   // ---- Load existing saved credentials on mount ----
@@ -190,7 +192,7 @@ export function SettingsForm(props: { onSaved?: () => void }) {
     let isMounted = true;
     getCredentials()
       .then(function (creds) {
-        if (isMounted && creds) {
+        if (isMounted && creds && creds.token) {
           setSettings(function (prev) {
             return {
               ...prev,
@@ -199,6 +201,8 @@ export function SettingsForm(props: { onSaved?: () => void }) {
               githubRepo: creds.repo || "",
             };
           });
+          setVerifiedUsername(creds.username || creds.owner || null);
+          setIsConnected(true);
         }
         if (isMounted) setLoading(false);
       })
@@ -215,6 +219,7 @@ export function SettingsForm(props: { onSaved?: () => void }) {
   const handleTextChange = (field: keyof FikaSettings, value: string) => {
     setSettings((prev) => ({ ...prev, [field]: value }));
     setMessage(null);
+    setIsConnected(false);
   };
 
   const handleCheckboxChange = (field: keyof FikaSettings, checked: boolean) => {
@@ -226,6 +231,7 @@ export function SettingsForm(props: { onSaved?: () => void }) {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(null);
+    setIsConnected(false);
 
     // 1. Validation
     if (!settings.githubToken.trim()) {
@@ -248,24 +254,33 @@ export function SettingsForm(props: { onSaved?: () => void }) {
       const validation = await validateToken(settings.githubToken.trim());
 
       if (!validation.valid) {
+        setIsConnected(false);
         setMessage({ text: "Token validation failed: " + validation.error, isError: true });
         setSaving(false);
         return;
       }
 
       // 3. Save credentials to chrome.storage.local
+      const username = validation.username || settings.githubOwner.trim();
       await saveCredentials({
         token: settings.githubToken.trim(),
         owner: settings.githubOwner.trim(),
         repo: settings.githubRepo.trim(),
-        username: validation.username || settings.githubOwner.trim(),
+        username: username,
       });
 
-      setMessage({ text: "Settings saved and GitHub connection verified!", isError: false });
+      setIsConnected(true);
+      setVerifiedUsername(username);
+      setMessage({
+        text: `🟢 Connection Verified! Connected as @${username}`,
+        isError: false,
+      });
+
       if (props.onSaved) {
         props.onSaved();
       }
     } catch (err) {
+      setIsConnected(false);
       setMessage({
         text: "Error saving settings: " + (err instanceof Error ? err.message : String(err)),
         isError: true,
@@ -274,6 +289,7 @@ export function SettingsForm(props: { onSaved?: () => void }) {
       setSaving(false);
     }
   };
+
 
   if (loading) {
     return <div style={{ color: "#8888aa", textAlign: "center", padding: "20px" }}>Loading settings...</div>;
@@ -288,9 +304,73 @@ export function SettingsForm(props: { onSaved?: () => void }) {
       </div>
 
       <form onSubmit={handleSave}>
+        {/* GREEN SIGNAL INDICATOR */}
+        {isConnected ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              backgroundColor: "#0d2b1d",
+              border: "1px solid #1b5e20",
+              padding: "10px 12px",
+              borderRadius: "6px",
+              marginBottom: "12px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span
+                style={{
+                  width: "10px",
+                  height: "10px",
+                  borderRadius: "50%",
+                  backgroundColor: "#4caf50",
+                  boxShadow: "0 0 10px #4caf50",
+                  display: "inline-block",
+                }}
+              />
+              <span style={{ fontSize: "12px", fontWeight: "700", color: "#4caf50" }}>
+                GitHub Signal: Connected
+              </span>
+            </div>
+            {verifiedUsername && (
+              <span style={{ fontSize: "11px", color: "#81c784", fontWeight: "600" }}>
+                @{verifiedUsername}
+              </span>
+            )}
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              backgroundColor: "#1e1e38",
+              border: "1px solid #333355",
+              padding: "8px 12px",
+              borderRadius: "6px",
+              marginBottom: "12px",
+            }}
+          >
+            <span
+              style={{
+                width: "10px",
+                height: "10px",
+                borderRadius: "50%",
+                backgroundColor: "#8888aa",
+                display: "inline-block",
+              }}
+            />
+            <span style={{ fontSize: "11px", color: "#aaaabb" }}>
+              Signal Status: Disconnected / Unverified
+            </span>
+          </div>
+        )}
+
         {/* SECTION 1: GITHUB CONFIGURATION */}
         <div style={styles.section}>
           <div style={styles.sectionTitle}>GitHub Credentials</div>
+
 
           <div style={styles.formGroup}>
             <label style={styles.label}>Personal Access Token (PAT)</label>
